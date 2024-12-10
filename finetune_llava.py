@@ -334,7 +334,7 @@ def test(model, dataset, processor, max_new_tokens=1, predictions_dir="./predict
                                                    messages["correct_verb_nouns"])          
         total += 1
     
-    out["accuacy"] = {num_correct/total}
+    out["accuacy"] = num_correct/total
     
     with open(os.path.join(predictions_dir, "out.json"), "w") as file:
         json.dump(out, file, indent=4)
