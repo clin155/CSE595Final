@@ -10,12 +10,24 @@ from datasets import load_dataset, Dataset, DatasetDict
 import os
 import numpy as np
 import random
+import argparse
 import zipfile
 from PIL import Image
 from sklearn.model_selection import train_test_split
+from huggingface_hub import login
+import wandb
+
 NUM_CHOICES = 5
 TEST_PERCENTAGE = 0.3
 DATASET_DIR = "./dataset"
+FINETUNED_MODEL_DIR = "./qwen2-7b-instruct-trl-sft-action-effect"
+
+
+hugging_token = os.getenv('HUGGINGFACE_HUB_TOKEN')
+print(hugging_token)
+login(hugging_token)
+wandb.login()
+print("LOGIN DONE")
 
 def process_zip(zip_path):
     # Temporary directory for extraction
@@ -46,17 +58,21 @@ def process_zip(zip_path):
     action_verbs_array = np.array(action_verbs, dtype=str)
     return images, action_verbs_array
 
-def get_dataset(zip_dir):
-  if not os.path.exists(DATASET_DIR):
+def get_dataset(params):
+  if not os.path.exists(DATASET_DIR) or params.force_reload_dataset:
     dataset = load_dataset("sled-umich/Action-Effect", trust_remote_code=True)
     dataset_imgs = [img for img_list in dataset["ActionEffect"]["positive_image_list"] for img in img_list]
     verb_nouns = np.array(dataset["ActionEffect"]["verb noun"], dtype=str)
     dataset_correct_verb_nouns = np.repeat(verb_nouns, [len(img_list) for img_list in dataset["ActionEffect"]["positive_image_list"]])
 
-    gen_imgs, gen_correct_verb_nouns = process_zip(zip_dir)
-
-    img_array = dataset_imgs + gen_imgs
-    correct_verb_nouns = np.concatenate([dataset_correct_verb_nouns, gen_correct_verb_nouns])
+    if params.include_gen_images:
+        gen_imgs, gen_correct_verb_nouns = process_zip(params.zip_directory)
+        
+        img_array = dataset_imgs + gen_imgs
+        correct_verb_nouns = np.concatenate([dataset_correct_verb_nouns, gen_correct_verb_nouns])
+    else:
+        img_array = dataset_imgs
+        correct_verb_nouns = dataset_correct_verb_nouns
 
     verb_noun_choices = []
     correct_indices = []
@@ -114,12 +130,6 @@ def get_dataset(zip_dir):
     dataset_dict = DatasetDict.load_from_disk(DATASET_DIR)
 
   return dataset_dict
-
-
-dataset_dict = get_dataset("generated_images.zip")
-train_dataset = dataset_dict["train"]
-eval_dataset = train_dataset
-
 
 #system_message = """You are a helpful assistant. You are shown an image. Select the correct action that would cause the effect depicted in the image."""
 system_message = """You are a helpful assistant. You are shown an image. Select the number corresponding to the correct action that would cause the effect depicted in the image."""
@@ -180,9 +190,6 @@ def format_data(sample):
     ]
 
 
-train_dataset = [format_data(sample) for sample in train_dataset]
-eval_dataset = [format_data(sample) for sample in eval_dataset]
-
 model_id = "Qwen/Qwen2-VL-7B-Instruct"
 bnb_config = BitsAndBytesConfig(
     load_in_4bit=True, bnb_4bit_use_double_quant=True, bnb_4bit_quant_type="nf4", bnb_4bit_compute_dtype=torch.bfloat16
@@ -193,72 +200,6 @@ model = Qwen2VLForConditionalGeneration.from_pretrained(
     model_id, device_map="cuda:0", torch_dtype=torch.bfloat16, quantization_config=bnb_config
 )
 processor = Qwen2VLProcessor.from_pretrained(model_id)
-
-
-# Configure LoRA
-peft_config = LoraConfig(
-    lora_alpha=128,
-    lora_dropout=0.05,
-    r=64,
-    bias="none",
-    target_modules=["q_proj", "v_proj"],
-    task_type="CAUSAL_LM",
-)
-
-# Apply PEFT model adaptation
-peft_model = get_peft_model(model, peft_config)
-
-# Print trainable parameters
-peft_model.print_trainable_parameters()
-
-
-# Configure training arguments
-training_args = SFTConfig(
-    output_dir="/nfs/turbo/coe-ahowens-nobackup/chfeng/qwen2-7b-instruct-trl-sft-action-effect",  # Directory to save the model
-    num_train_epochs=3,  # Number of training epochs
-    per_device_train_batch_size=2,  # Batch size for training
-    per_device_eval_batch_size=2,  # Batch size for evaluation
-    gradient_accumulation_steps=16,  # Steps to accumulate gradients
-    gradient_checkpointing=True,  # Enable gradient checkpointing for memory efficiency
-    # Optimizer and scheduler settings
-    optim="adamw_torch_fused",  # Optimizer type
-    learning_rate=2e-4,  # Learning rate for training
-    lr_scheduler_type="constant",  # Type of learning rate scheduler
-    # Logging and evaluation
-    logging_steps=10,  # Steps interval for logging
-    eval_steps=50,  # Steps interval for evaluation
-    eval_strategy="steps",  # Strategy for evaluation
-    save_strategy="steps",  # Strategy for saving the model
-    save_steps=50,  # Steps interval for saving
-    metric_for_best_model="eval_loss",  # Metric to evaluate the best model
-    greater_is_better=False,  # Whether higher metric values are better
-    load_best_model_at_end=True,  # Load the best model after training
-    # Mixed precision and gradient settings
-    bf16=True,  # Use bfloat16 precision
-    tf32=True,  # Use TensorFloat-32 precision
-    max_grad_norm=0.3,  # Maximum norm for gradient clipping
-    warmup_ratio=0.03,  # Ratio of total steps for warmup
-    # Hub and reporting
-    push_to_hub=False,  # Whether to push model to Hugging Face Hub
-    report_to="wandb",  # Reporting tool for tracking metrics
-    # Gradient checkpointing settings
-    gradient_checkpointing_kwargs={"use_reentrant": False},  # Options for gradient checkpointing
-    # Dataset configuration
-    dataset_text_field="",  # Text field in dataset
-    dataset_kwargs={"skip_prepare_dataset": True},  # Additional dataset options
-    # max_seq_length=1024  # Maximum sequence length for input
-)
-
-training_args.remove_unused_columns = False  # Keep unused columns in dataset
-
-
-import wandb
-
-wandb.init(
-    project="qwen2-7b-instruct-trl-sft-action-effect",  # change this
-    name="qwen2-7b-instruct-trl-sft-action-effect",  # change this
-    config=training_args,
-)
 
 # Create a data collator to encode text and image pairs
 def collate_fn(examples):
@@ -291,15 +232,95 @@ def collate_fn(examples):
 
     return batch  # Return the prepared batch
 
+def main(params):
+    dataset_dict = get_dataset(params)
+    train_dataset = dataset_dict["train"]
+    eval_dataset = train_dataset
 
-trainer = SFTTrainer(
-    model=model,
-    args=training_args,
-    train_dataset=train_dataset,
-    eval_dataset=eval_dataset,
-    data_collator=collate_fn,
-    peft_config=peft_config,
-    tokenizer=processor.tokenizer,
-)
+    train_dataset = [format_data(sample) for sample in train_dataset]
+    eval_dataset = [format_data(sample) for sample in eval_dataset]
 
-trainer.train()
+    # Configure LoRA
+    peft_config = LoraConfig(
+        lora_alpha=128,
+        lora_dropout=0.05,
+        r=64,
+        bias="none",
+        target_modules=["q_proj", "v_proj"],
+        task_type="CAUSAL_LM",
+    )
+
+    # Apply PEFT model adaptation
+    peft_model = get_peft_model(model, peft_config)
+
+    # Print trainable parameters
+    peft_model.print_trainable_parameters()
+
+
+    # Configure training arguments
+    training_args = SFTConfig(
+        output_dir=FINETUNED_MODEL_DIR,  # Directory to save the model
+        num_train_epochs=3,  # Number of training epochs
+        per_device_train_batch_size=2,  # Batch size for training
+        per_device_eval_batch_size=2,  # Batch size for evaluation
+        gradient_accumulation_steps=16,  # Steps to accumulate gradients
+        gradient_checkpointing=True,  # Enable gradient checkpointing for memory efficiency
+        # Optimizer and scheduler settings
+        optim="adamw_torch_fused",  # Optimizer type
+        learning_rate=2e-4,  # Learning rate for training
+        lr_scheduler_type="constant",  # Type of learning rate scheduler
+        # Logging and evaluation
+        logging_steps=10,  # Steps interval for logging
+        eval_steps=50,  # Steps interval for evaluation
+        eval_strategy="steps",  # Strategy for evaluation
+        save_strategy="steps",  # Strategy for saving the model
+        save_steps=50,  # Steps interval for saving
+        metric_for_best_model="eval_loss",  # Metric to evaluate the best model
+        greater_is_better=False,  # Whether higher metric values are better
+        load_best_model_at_end=True,  # Load the best model after training
+        # Mixed precision and gradient settings
+        bf16=True,  # Use bfloat16 precision
+        tf32=True,  # Use TensorFloat-32 precision
+        max_grad_norm=0.3,  # Maximum norm for gradient clipping
+        warmup_ratio=0.03,  # Ratio of total steps for warmup
+        # Hub and reporting
+        push_to_hub=False,  # Whether to push model to Hugging Face Hub
+        report_to="wandb",  # Reporting tool for tracking metrics
+        # Gradient checkpointing settings
+        gradient_checkpointing_kwargs={"use_reentrant": False},  # Options for gradient checkpointing
+        # Dataset configuration
+        dataset_text_field="",  # Text field in dataset
+        dataset_kwargs={"skip_prepare_dataset": True},  # Additional dataset options
+        # max_seq_length=1024  # Maximum sequence length for input
+    )
+
+    training_args.remove_unused_columns = False  # Keep unused columns in dataset
+
+    wandb.init(
+        project="qwen2-7b-instruct-trl-sft-action-effect",  # change this
+        name="qwen2-7b-instruct-trl-sft-action-effect",  # change this
+        config=training_args,
+    )
+    trainer = SFTTrainer(
+        model=model,
+        args=training_args,
+        train_dataset=train_dataset,
+        eval_dataset=eval_dataset,
+        data_collator=collate_fn,
+        peft_config=peft_config,
+        tokenizer=processor.tokenizer,
+    )
+
+    trainer.train()
+    
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Finetune Qwen model for Action effect prediction")
+    parser.add_argument("--force_reload_dataset", type=bool, default=False, help="")
+    parser.add_argument("--zip_directory", type=str, default="./generated_images.zip", help="")
+    parser.add_argument("--include_gen_images", type=bool, default=False, help="")
+    params, unknown = parser.parse_known_args()
+    main(params)
+    
+
+
+    

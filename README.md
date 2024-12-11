@@ -10,3 +10,6 @@ python finetune_llava.py
         test_only -> only run inference no fine tuning
 python finetune_llama.py
     args: all the same args except for test_only
+
+python qwen-vl-7b-sft.py
+    args: all the same args except for test_only
