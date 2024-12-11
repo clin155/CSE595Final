@@ -235,7 +235,7 @@ def collate_fn(examples):
 def main(params):
     dataset_dict = get_dataset(params)
     train_dataset = dataset_dict["train"]
-    eval_dataset = train_dataset
+    eval_dataset = dataset_dict["train"]
 
     train_dataset = [format_data(sample) for sample in train_dataset]
     eval_dataset = [format_data(sample) for sample in eval_dataset]
