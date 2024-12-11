@@ -13,3 +13,5 @@ python finetune_llama.py
 
 python qwen-vl-7b-sft.py
     args: all the same args except for test_only
+
+make sure torch==2.4.1
