@@ -29,6 +29,21 @@ login(hugging_token)
 wandb.login()
 print("LOGIN DONE")
 
+def compute_metrics(eval_pred):
+    # Unpack the predictions and labels
+    preds, labels = eval_pred
+    preds = preds.flatten().cpu().numpy()  # Flatten predictions
+    labels = labels.flatten().cpu().numpy()  # Flatten labels
+
+    # Mask out padding if necessary (using -100 for padding tokens)
+    mask = labels != -100
+    preds = preds[mask]
+    labels = labels[mask]
+
+    # Calculate accuracy (since this seems like a classification task, compare the predicted action with the true label)
+    accuracy = (preds == labels).mean()  # Simple accuracy calculation
+    return {"accuracy": accuracy}
+
 def process_zip(zip_path):
     # Temporary directory for extraction
     extract_dir = "./temp"
@@ -260,7 +275,7 @@ def main(params):
     # Configure training arguments
     training_args = SFTConfig(
         output_dir=FINETUNED_MODEL_DIR,  # Directory to save the model
-        num_train_epochs=3,  # Number of training epochs
+        num_train_epochs=2,  # Number of training epochs
         per_device_train_batch_size=2,  # Batch size for training
         per_device_eval_batch_size=2,  # Batch size for evaluation
         gradient_accumulation_steps=16,  # Steps to accumulate gradients
@@ -307,6 +322,7 @@ def main(params):
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
         data_collator=collate_fn,
+        compute_metrics=compute_metrics,
         peft_config=peft_config,
         tokenizer=processor.tokenizer,
     )
