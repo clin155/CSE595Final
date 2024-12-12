@@ -69,14 +69,24 @@ def create_prompt_instruction(effect, verb_noun_choices, correct_label=None):
         str: A formatted prompt string.
     """
     correct_label = f"{correct_label + 1}" if correct_label is not None else ""
-    verb_noun_choices = "\n".join([f"{i+1}. {choice}" for i, choice in enumerate(verb_noun_choices)])
-    instruction = f"""You are given an action-effect question. The question includes some effects and a list of action choices. Based on the provided effects, choose the most possible action choice that causes the effects.\n
-    In your answer, first predict the possible actions based on the effects, then choose the correct action from the list of action choices with a prefix of \'### Correct Label: \' at the end of your answer.\n
-    Below is the question:"""
+    num_choices = len(verb_noun_choices)
+    verb_noun_choices = "\n".join([f"{i+1}: {choice}" for i, choice in enumerate(verb_noun_choices)])
+    # instruction = f"""You are given an action-effect question. The question includes some effects and a list of action choices. Based on the provided effects, choose the most possible action choice that causes the effects.\n
+    # In your answer, first predict the possible actions based on the effects, then choose the correct action from the list of action choices with a prefix of \'### Correct Label: \' at the end of your answer.\n
+    # Below is the question:"""
+    # if correct_label is not None:
+    #     return f"{instruction}\n### Effect:\n{effect}\n### Action Choices:\n{verb_noun_choices}\n### Correct Label: {correct_label}"
+    # else:
+    #     return f"{instruction}\n### Effect:\n{effect}\n### Action Choices:\n{verb_noun_choices}"
+    
+    # prompt = f"""In your answer, first predict the possible actions based on the effects, then choose the correct action (one number from 1 to { str(num_choices) }) from the list of action choices with a prefix of \'### Correct Label: \' at the end of your answer.
+    # """
+    prompt = f"Select the correct action that would cause the effect depicted in the image."
+    instruction = f"""USER: You are a helpful assistant. You are shown an image.\n{prompt}\nAnswer with one number from 1 to { str(num_choices) }.\nEffect:\n{effect}\nChoices:\n{verb_noun_choices}\nASSISTANT: """
     if correct_label is not None:
-        return f"{instruction}\n### Effect:\n{effect}\n### Action Choices:\n{verb_noun_choices}\n### Correct Label: {correct_label}"
+        return f"{instruction}{correct_label}"
     else:
-        return f"{instruction}\n### Effect:\n{effect}\n### Action Choices:\n{verb_noun_choices}"
+        return f"{instruction}"
 
 
 def process_zip(zip_path):
@@ -252,7 +262,7 @@ def train_model(
     lora_alpha=8,
     lora_dropout=0.2,
     target_modules="all-linear",
-    num_epochs=0,
+    num_epochs=3,
     lr=1.5e-5,
     per_device_train_batch_size=8,
     gradient_acc_steps=4,
@@ -287,8 +297,11 @@ def train_model(
 
     train_dataset = dataset_dict["train"]
     print("train shape:", train_dataset.shape)
+    # eval_dataset = dataset_dict["test"]
     eval_dataset = train_dataset
-    for i in range(10):
+    
+    
+    for i in range(3):
         example = create_prompt_instruction(
                 train_dataset[i]['effects'],
                 train_dataset[i]['verb_noun_choices'],
@@ -332,9 +345,10 @@ def train_model(
     for name, module in trainer.model.named_modules():
         if "norm" in name:
             module = module.to(torch.float32)
-            
-    print("STARTING TRAIN")
-    trainer.train()
+    
+    if params.zero_shot:
+        print("STARTING TRAIN")
+        trainer.train()
 
     return trainer, model, tokenizer
 
@@ -348,9 +362,10 @@ def test(model, dataset, create_prompt_func, tokenizer, max_new_tokens=1):
         text = create_prompt_func(messages["effects"], messages["verb_noun_choices"], None)
         inputs = tokenizer(text, return_tensors="pt")
         inputs = {k: v.to(model.device) for k, v in inputs.items()}
-        output = model.generate(**inputs, max_new_tokens=2, pad_token_id=tokenizer.eos_token_id)
+        output = model.generate(**inputs, max_new_tokens=max_new_tokens, pad_token_id=tokenizer.eos_token_id)
         predicted_answer = tokenizer.decode(output[0], skip_special_tokens=True)
-        response = predicted_answer.find("### Correct Label: ") + len("### Correct Label: ")
+        # response = predicted_answer.find("### Correct Label: ") + len("### Correct Label: ")
+        response = predicted_answer.find("ASSISTANT: ") + len("ASSISTANT: ")
         response = predicted_answer[response:].strip()
         
         print("Ground Truth:", messages['verb_noun_choices'][messages['correct_indices']], messages["correct_indices"] + 1)
@@ -381,12 +396,10 @@ def main(params):
     if (not params.test_only):
         trainer, model, tokenizer = train_model(dataset_dict)
         model = save_model(trainer, model, FINETUNED_MODEL_DIR)
-
         test(model, dataset_dict["test"], create_prompt_instruction, tokenizer)
 
     else:
         model = load_llama_trained_lora(FINETUNED_MODEL_DIR)
-        # TODO
         test(model, dataset_dict["test"], create_prompt_instruction)
     
 
@@ -394,6 +407,7 @@ def main(params):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Finetune LLama-based model for AE Task")
     parser.add_argument("--test_only", type=bool, default=False, help="Test only")
+    parser.add_argument("--zero_shot", type=bool, default=False, help="Test only")
     parser.add_argument("--force_reload_dataset", type=bool, default=False, help="")
     parser.add_argument("--zip_directory", type=str, default="./generated_effects.zip", help="")
     parser.add_argument("--include_gen_effects", type=bool, default=False, help="")
