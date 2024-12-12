@@ -19,4 +19,6 @@ make sure torch==2.4.1
 for zero-shot:
 python zero_shot_llava.py
 
-python q
+python test_qwen.py
+
+python fintune_llama --zero_shot=True
